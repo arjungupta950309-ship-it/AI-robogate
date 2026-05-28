@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 import cv2
+import imageio_ffmpeg
 
 from detector import Detector
+
+
+def _reencode_to_h264(src: str, dst: str) -> None:
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg, "-y", "-i", src,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-an",
+        dst,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
 
 
 def process_video(
@@ -14,6 +31,7 @@ def process_video(
     detector: Detector,
     frame_skip: int = 3,
     progress_callback: Optional[Callable[[float], None]] = None,
+    use_tracking: bool = False,
 ) -> dict:
     input_path = str(input_path)
     output_path = str(output_path)
@@ -27,8 +45,10 @@ def process_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
+    raw_fd, raw_path = tempfile.mkstemp(suffix=".mp4", prefix="robogate_raw_")
+    os.close(raw_fd)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(raw_path, fourcc, fps, (width, height))
 
     last_detections: list[dict] = []
     total_detections = 0
@@ -36,6 +56,8 @@ def process_video(
     per_second_counts: dict[int, int] = {}
     frames_analyzed = 0
     frame_idx = 0
+    # Tracking: remember the class of each track id so we can count unique objects.
+    track_classes: dict[int, str] = {}
 
     try:
         while True:
@@ -43,7 +65,21 @@ def process_video(
             if not ok:
                 break
 
-            if frame_idx % max(frame_skip, 1) == 0:
+            if use_tracking:
+                # Track every frame in sequence; reset the tracker on frame 0.
+                last_detections = detector.track(frame, persist=frame_idx > 0)
+                frames_analyzed += 1
+                second = int(frame_idx / fps) if fps > 0 else 0
+                per_second_counts[second] = (
+                    per_second_counts.get(second, 0) + len(last_detections)
+                )
+                total_detections += len(last_detections)
+                confidence_sum += sum(d["confidence"] for d in last_detections)
+                for d in last_detections:
+                    tid = d.get("track_id")
+                    if tid is not None:
+                        track_classes[tid] = d["class_name"]
+            elif frame_idx % max(frame_skip, 1) == 0:
                 last_detections = detector.detect(frame)
                 frames_analyzed += 1
                 second = int(frame_idx / fps) if fps > 0 else 0
@@ -58,10 +94,21 @@ def process_video(
 
             frame_idx += 1
             if progress_callback and total_frames > 0:
-                progress_callback(min(frame_idx / total_frames, 1.0))
+                # Reserve the final 5% of the progress bar for the H.264 re-encode step.
+                progress_callback(min(frame_idx / total_frames, 1.0) * 0.95)
     finally:
         cap.release()
         writer.release()
+
+    try:
+        _reencode_to_h264(raw_path, output_path)
+    finally:
+        try:
+            os.remove(raw_path)
+        except OSError:
+            pass
+    if progress_callback:
+        progress_callback(1.0)
 
     avg_conf = (confidence_sum / total_detections) if total_detections else 0.0
 
@@ -73,4 +120,5 @@ def process_video(
         "fps": fps,
         "per_second_counts": per_second_counts,
         "output_path": output_path,
+        "unique_objects": len(track_classes) if use_tracking else None,
     }

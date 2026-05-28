@@ -65,6 +65,15 @@ def pick_random_asset(directory: Path, extensions: set[str]) -> Path | None:
     return random.choice(files)
 
 
+def list_assets(directory: Path, extensions: set[str]) -> list[Path]:
+    if not directory.exists():
+        return []
+    return sorted(
+        (p for p in directory.iterdir() if p.suffix.lower() in extensions),
+        key=lambda p: p.name,
+    )
+
+
 def run_photo_tab(detector: Detector) -> None:
     st.subheader("フォト検知")
     col_upload, col_sample = st.columns([3, 1])
@@ -115,36 +124,42 @@ def run_photo_tab(detector: Detector) -> None:
         st.info("検知対象は見つかりませんでした。")
 
 
-def run_video_tab(detector: Detector, frame_skip: int) -> None:
+def run_video_tab(detector: Detector, frame_skip: int, use_tracking: bool = False) -> None:
     st.subheader("ビデオ検知")
-    col_upload, col_sample = st.columns([3, 1])
-    with col_upload:
+
+    # サーバー上に保存済みのサンプル動画から選ぶ。
+    # ファイルはすでにサーバーにあるため、アップロード（転送待ち）が発生しない。
+    sample_videos = list_assets(config.VIDEOS_DIR, {".mp4", ".mov"})
+
+    source_path: Path | None = None
+    if sample_videos:
+        selected = st.selectbox(
+            "サンプル動画を選択",
+            options=[p.name for p in sample_videos],
+            index=0,
+            key="video_sample_select",
+        )
+        source_path = next(p for p in sample_videos if p.name == selected)
+        st.caption(f"サンプル: {selected}")
+    else:
+        st.warning("assets/videos/ にサンプル動画がありません。")
+
+    # 任意: 自分の動画を使う場合のフォールバック（こちらはアップロードが発生します）。
+    with st.expander("自分の動画をアップロードする（任意）", expanded=False):
         uploaded = st.file_uploader(
             "動画をアップロード", type=["mp4", "mov"], key="video_upload"
         )
-    with col_sample:
-        st.write("")
-        st.write("")
-        sample_clicked = st.button(
-            "サンプル動画で試す", use_container_width=True, key="video_sample"
-        )
-
-    source_path: Path | None = None
-    if uploaded is not None:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).suffix)
-        tmp.write(uploaded.read())
-        tmp.close()
-        source_path = Path(tmp.name)
-    elif sample_clicked:
-        sample = pick_random_asset(config.VIDEOS_DIR, {".mp4", ".mov"})
-        if sample is None:
-            st.warning("assets/videos/ にサンプル動画がありません。")
-        else:
-            source_path = sample
-            st.caption(f"サンプル: {sample.name}")
+        if uploaded is not None:
+            tmp = tempfile.NamedTemporaryFile(
+                delete=False, suffix=Path(uploaded.name).suffix
+            )
+            tmp.write(uploaded.read())
+            tmp.close()
+            source_path = Path(tmp.name)
+            st.caption(f"アップロード: {uploaded.name}")
 
     if source_path is None:
-        st.info("動画をアップロードするか、サンプル動画ボタンを押してください。")
+        st.info("サンプル動画を選択するか、動画をアップロードしてください。")
         return
 
     if st.button("解析開始", type="primary", key="video_run"):
@@ -152,7 +167,9 @@ def run_video_tab(detector: Detector, frame_skip: int) -> None:
         progress = st.progress(0.0, text="解析中...")
 
         def update(p: float) -> None:
-            progress.progress(min(p, 1.0), text=f"解析中... {int(p * 100)}%")
+            pct = int(p * 100)
+            label = "エンコード中..." if p >= 0.95 else f"解析中... {pct}%"
+            progress.progress(min(p, 1.0), text=label)
 
         stats = process_video(
             source_path,
@@ -160,26 +177,30 @@ def run_video_tab(detector: Detector, frame_skip: int) -> None:
             detector,
             frame_skip=frame_skip,
             progress_callback=update,
+            use_tracking=use_tracking,
         )
         progress.empty()
 
-        st.success("解析完了")
-        st.video(str(output_path))
+        with st.container(border=True):
+            if stats.get("unique_objects") is not None:
+                m1, m2, m3, m4 = st.columns(4)
+                m4.metric("ユニーク物体数", stats["unique_objects"])
+            else:
+                m1, m2, m3 = st.columns(3)
+            m1.metric("解析フレーム数", stats["frames_analyzed"])
+            m2.metric("検知数合計", stats["total_detections"])
+            m3.metric("平均信頼度", f"{stats['average_confidence']:.3f}")
+            st.video(str(output_path))
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("解析フレーム数", stats["frames_analyzed"])
-        c2.metric("検知数合計", stats["total_detections"])
-        c3.metric("平均信頼度", f"{stats['average_confidence']:.3f}")
-
-        st.markdown("### タイムライン (秒ごとの検知数)")
-        if stats["per_second_counts"]:
-            df = pd.DataFrame(
-                sorted(stats["per_second_counts"].items()),
-                columns=["秒", "検知数"],
-            ).set_index("秒")
-            st.bar_chart(df)
-        else:
-            st.info("検知対象は見つかりませんでした。")
+        with st.expander("タイムライン (秒ごとの検知数)", expanded=False):
+            if stats["per_second_counts"]:
+                df = pd.DataFrame(
+                    sorted(stats["per_second_counts"].items()),
+                    columns=["秒", "検知数"],
+                ).set_index("秒")
+                st.bar_chart(df)
+            else:
+                st.info("検知対象は見つかりませんでした。")
 
 
 def run_roadmap_tab() -> None:
@@ -236,6 +257,11 @@ def main() -> None:
         st.subheader("ビデオ解析")
         frame_skip = st.slider("フレームスキップ", 1, 10, config.DEFAULT_FRAME_SKIP)
         st.caption(f"{frame_skip}フレームに1回検知を実行")
+        use_tracking = st.checkbox("オブジェクトトラッキング", value=False)
+        st.caption(
+            "枠を安定させ、各個体にIDを付与します。"
+            "毎フレーム検知するためフレームスキップは無視され、処理は遅くなります。"
+        )
 
     detector = load_detector()
     detector.conf_threshold = conf_threshold
@@ -244,7 +270,7 @@ def main() -> None:
     with tab1:
         run_photo_tab(detector)
     with tab2:
-        run_video_tab(detector, frame_skip)
+        run_video_tab(detector, frame_skip, use_tracking)
     with tab3:
         run_roadmap_tab()
 

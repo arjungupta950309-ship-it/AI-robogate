@@ -1,34 +1,325 @@
-# RoboGate Demo — 害虫検知デモ
+# RoboGate Demo ── 害虫検知デモ
 
-VC pitch demo for NTP's RoboGate anomaly judgment engine. Detects クビアカツヤカミキリ (red-necked longhorn beetle) in photos and videos.
+NTP（日本通運グループ系）の **RoboGate 異常判定エンジン** を題材とした、VC ピッチ用プロトタイプです。
+写真および動画から、和歌山県の梅産業を脅かしている特定外来生物 **「クビアカツヤカミキリ（Aromia bungii / Red-Necked Longhorn Beetle）」** を検知します。
 
-> This is a demo, not production code.
+> ⚠️ 本プロジェクトは **デモ／PoC 用途** であり、本番運用を想定したコードではありません。
+> モデル精度・性能・セキュリティは商用水準には未到達です。
 
-## Setup
+---
+
+## 目次
+
+1. [プロジェクト概要](#プロジェクト概要)
+2. [主な機能](#主な機能)
+3. [想定ユースケースとロードマップ](#想定ユースケースとロードマップ)
+4. [動作環境](#動作環境)
+5. [セットアップ](#セットアップ)
+6. [起動方法](#起動方法)
+7. [使い方](#使い方)
+8. [ディレクトリ構成](#ディレクトリ構成)
+9. [設定（config.py）](#設定configpy)
+10. [モデルについて](#モデルについて)
+11. [学習用スクリプト](#学習用スクリプト)
+12. [トラブルシューティング](#トラブルシューティング)
+13. [ライセンス・免責事項](#ライセンス免責事項)
+
+---
+
+## プロジェクト概要
+
+クビアカツヤカミキリは、**梅・桃・桜などバラ科の果樹を内部から食い荒らす特定外来生物** です。
+天敵がいないため一度広がると止まらず、和歌山県では日高川町まで4年余りで **3,500 本** の被害が発生しています。
+**和歌山の梅生産（全国シェア 60%）の中心地・みなべ町が次の標的** として警戒されています。
+
+行政側もすでに予算を投下している領域です。
+
+| 補助制度 | 金額 | 主体 |
+| --- | --- | --- |
+| フラス発見者への懸賞金 | **¥10,000 / 件** | みなべ町農業士会（2024 年 4 月〜） |
+| 被害木伐採への支援金 | **¥60,000 / 本** | 和歌山県・各町 |
+
+RoboGate はこの「発見プロセス」を **ロボット × AI** で自動化することを目的としており、
+本リポジトリはその第一歩として「画像／動画からのクビアカ検知」を Streamlit 上で体験できる形にしたものです。
+
+---
+
+## 主な機能
+
+- **フォト検知タブ**
+  - 画像をアップロードしてリアルタイムに検知
+  - `assets/images/` 内のサンプル画像をランダム表示
+  - 検知結果（クラス・信頼度・バウンディングボックス）をテーブル表示
+
+- **ビデオ検知タブ**
+  - サーバー上に事前配置したサンプル動画から選択（アップロード待ちなし）
+  - 任意でユーザー自身の動画もアップロード可能
+  - フレームスキップ設定で高速プレビュー
+  - **オブジェクトトラッキング（ByteTrack）** によるユニーク個体数カウントに対応
+  - 解析結果は H.264 に再エンコードされ、ブラウザ上で即再生可能
+  - 秒単位の検知数タイムラインをグラフ表示
+
+- **ロードマップタブ**
+  - フェーズ別の開発ロードマップ
+  - 和歌山県・みなべ町の市場規模、行政予算（KPI）をピッチ向けに可視化
+
+- **日本語対応の描画**
+  - Pillow + NotoSans／MS ゴシック等で **画像上にも日本語ラベル** を描画
+  - フォントが見つからない場合は GitHub から NotoSansCJK JP を自動ダウンロードしてフォールバック
+
+---
+
+## 想定ユースケースとロードマップ
+
+| フェーズ | 内容 | 状態 |
+| --- | --- | --- |
+| **フェーズ 1** | 写真からのクビアカ検知 | ✅ 本デモで実装済み |
+| **フェーズ 2** | 動画からの検知（トラッキング含む） | ✅ 本デモで実装済み |
+| **フェーズ 3** | ドローン映像のストリーミング解析 | 🔜 次フェーズ |
+| **フェーズ 4** | 四足歩行ロボット（Unitree Go2）への搭載 | 🔜 次フェーズ |
+
+---
+
+## 動作環境
+
+- **OS**: Windows 10 / 11、macOS、Linux（いずれも動作確認）
+- **Python**: 3.10 以上（推奨 3.10〜3.12）
+- **GPU**: 任意。CPU でも動作するが、動画解析は GPU 推奨
+- **必要ディスク**: 約 2 GB（モデル＋依存パッケージ＋サンプル動画）
+- **メモリ**: 8 GB 以上推奨（動画解析時）
+
+主要な依存ライブラリ（`requirements.txt`）
+
+| パッケージ | 用途 |
+| --- | --- |
+| `streamlit` | UI フレームワーク |
+| `ultralytics` | YOLOv8（検知・トラッキングモデル） |
+| `opencv-python-headless` | 画像・動画 I/O、フレーム処理 |
+| `pillow` | 日本語ラベル描画 |
+| `numpy`, `pandas` | 数値処理・テーブル表示 |
+| `imageio-ffmpeg` | H.264 再エンコード |
+
+---
+
+## セットアップ
+
+### 1. リポジトリ取得
+
+```bash
+git clone <repository-url>
+cd project
+```
+
+### 2. 仮想環境の作成
 
 ```bash
 python -m venv .venv
-# Windows:  .venv\Scripts\activate
-# macOS/Linux:  source .venv/bin/activate
+```
+
+仮想環境の有効化:
+
+```powershell
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+### 3. 依存パッケージのインストール
+
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Model weights
+> 💡 初回起動時、`yolov8n.pt`（ファインチューニング前のフォールバックモデル）が
+> Ultralytics により自動ダウンロードされます。
 
-Place a YOLOv8 `.pt` file at `models/robogate_v1.pt`. If no fine-tuned weights are available yet, the app falls back to `models/yolov8n.pt` (COCO pretrained, auto-downloaded by ultralytics on first run). See [models/README.md](models/README.md).
+### 4. サンプル素材の配置（任意）
 
-## Sample data
+`assets/images/` および `assets/videos/` に任意のサンプル画像・動画を入れてください。
+未配置でも UI からアップロードして使用できます。
 
-Drop test images into `assets/images/` (JPG/PNG) and test videos into `assets/videos/` (MP4/MOV). The "サンプル画像で試す" / "サンプル動画で試す" buttons pick one at random.
+---
 
-## Run
+## 起動方法
 
 ```bash
 streamlit run app.py
 ```
 
-## Tabs
+デフォルトでは <http://localhost:8501> でアクセスできます。
 
-1. **フォト検知** — upload a photo, see bounding boxes and a detection table.
-2. **ビデオ検知** — upload a video, get a frame-annotated output plus timeline and stats.
-3. **ロードマップ** — Phase 1–4 vision slide.
+オプション：
+
+```bash
+# ポート指定
+streamlit run app.py --server.port 8080
+
+# 外部からアクセス可能にする
+streamlit run app.py --server.address 0.0.0.0
+```
+
+---
+
+## 使い方
+
+### サイドバー設定
+
+- **信頼度しきい値**: 検知結果として採用する最小信頼度（0.0〜1.0、既定 0.5）
+- **フレームスキップ**: ビデオ解析時、N フレームに 1 回検知（既定 3）
+- **オブジェクトトラッキング**: 有効化すると ByteTrack で個体 ID を付与し、
+  ユニーク個体数を集計します（毎フレーム検知のため処理は遅くなります）
+
+### フォト検知
+
+1. 「画像をアップロード」または「サンプル画像で試す」をクリック
+2. 元画像・検知結果が左右に並び、下に検知一覧テーブルが表示されます
+
+### ビデオ検知
+
+1. サンプル動画を選択、または「自分の動画をアップロード」
+2. 「解析開始」をクリック
+3. 進捗バー終了後、
+   - フレーム数・検知数合計・平均信頼度・（任意で）ユニーク物体数
+   - 注釈付き動画プレビュー
+   - 秒単位の検知数タイムライン
+   が表示されます
+
+---
+
+## ディレクトリ構成
+
+```
+project/
+├── app.py                  # Streamlit エントリポイント
+├── detector.py             # YOLOv8 ラッパー（検知・トラッキング・日本語アノテーション）
+├── video_processor.py      # 動画解析パイプライン（フレーム送り・H.264 再エンコード）
+├── config.py               # パス・しきい値・クラス名・色・日本語フォント設定
+├── requirements.txt        # 依存パッケージ
+├── README.md               # 本ファイル
+│
+├── assets/
+│   ├── images/             # サンプル画像 (.jpg .jpeg .png)
+│   └── videos/             # サンプル動画 (.mp4 .mov)
+│
+├── models/
+│   ├── robogate_v1.pt      # 本番用ファインチューニングモデル（あれば優先）
+│   └── README.md           # モデル管理メモ
+│
+├── scripts/                # 学習・データ前処理ユーティリティ群
+│   ├── autolabel.py
+│   ├── build_label_queue.py
+│   ├── curate_upload_set.py
+│   ├── extract_video_frames.py
+│   ├── eyeball_detections.py
+│   ├── label.py
+│   ├── prep_dataset.py
+│   ├── split_dataset.py
+│   └── train.py
+│
+├── dataset/                # 学習用画像・ラベル
+├── label_queue/            # ラベリング待機キュー
+├── training_pool/          # 学習候補プール
+├── train_videos/           # 学習用動画
+├── roboflow_upload/        # Roboflow へのアップロード素材
+└── runs/                   # Ultralytics の学習・推論ログ
+```
+
+---
+
+## 設定（config.py）
+
+主要な設定は [config.py](config.py) に集約されています。
+
+| 変数 | 意味 |
+| --- | --- |
+| `DEFAULT_MODEL_PATH` | 優先使用するファインチューニングモデル（`models/robogate_v1.pt`） |
+| `FALLBACK_MODEL_PATH` | フォールバック用 COCO 事前学習モデル（`yolov8n.pt`） |
+| `DEFAULT_CONFIDENCE` | 既定の信頼度しきい値（0.5） |
+| `DEFAULT_FRAME_SKIP` | 動画解析時の既定フレームスキップ（3） |
+| `CLASS_LABELS_JP` | 検知一覧テーブル用の日本語クラス名辞書 |
+| `CLASS_LABELS_SHORT_JP` | 画像上に描画する短い日本語ラベル |
+| `CLASS_COLORS` | クラスごとのバウンディングボックス色（BGR） |
+| `JAPANESE_FONT_PATHS` | 日本語描画用フォントの探索パスリスト |
+
+検知対象クラス：
+
+| クラス名 | 日本語ラベル | 意味 |
+| --- | --- | --- |
+| `kubiaka` | クビアカツヤカミキリ | **検知対象（特定外来生物）** |
+| `other_kamikiri` | 他のカミキリムシ (対象外) | 在来カミキリ等の誤検知防止 |
+
+---
+
+## モデルについて
+
+- **既定**: `models/robogate_v1.pt`（自前データでファインチューニングしたもの）
+- **フォールバック**: 上記が無い場合 `yolov8n.pt`（COCO 事前学習、初回自動ダウンロード）
+
+> ⚠️ フォールバック時は COCO クラスでの検知になるため、クビアカは検知できません。
+> あくまで UI 動作確認用です。
+
+新しいモデルに差し替える場合は、
+`models/robogate_v1.pt` に学習済み重みを配置すれば自動で読み込まれます。
+
+---
+
+## 学習用スクリプト
+
+`scripts/` 配下に、データ収集〜学習までの一連のユーティリティを格納しています。
+
+| スクリプト | 役割 |
+| --- | --- |
+| `extract_video_frames.py` | 動画から学習用フレームを抽出 |
+| `build_label_queue.py` | ラベリング待機キューを構築 |
+| `autolabel.py` | 既存モデルでオートラベル付与 |
+| `label.py` | 手動ラベリング補助 |
+| `curate_upload_set.py` | Roboflow アップロード対象を選別 |
+| `prep_dataset.py` | YOLO 形式データセットへの整形 |
+| `split_dataset.py` | train/val 分割 |
+| `train.py` | YOLOv8 のファインチューニング実行 |
+| `eyeball_detections.py` | 検知結果の目視確認 |
+
+---
+
+## トラブルシューティング
+
+### Streamlit が起動しない
+
+- 仮想環境が有効か確認 (`which python` / `Get-Command python`)
+- `pip install -r requirements.txt` が成功しているか確認
+
+### 動画解析が極端に遅い
+
+- サイドバーで **フレームスキップ** を増やす（例: 5〜10）
+- **オブジェクトトラッキング** をオフにする（毎フレーム検知を回避）
+- GPU 環境（CUDA + 対応 PyTorch）への切替を検討
+
+### 画像上の日本語が文字化けする
+
+- `config.JAPANESE_FONT_PATHS` のフォントが OS に存在するか確認
+- いずれも見つからない場合、初回描画時に NotoSansCJK JP を
+  自動ダウンロードします（インターネット接続が必要）
+
+### `cv2.error: Cannot open video`
+
+- 入力動画コーデックが OpenCV に未対応の可能性
+- `.mp4 (H.264)` への事前変換を推奨
+
+### H.264 再エンコードに失敗する
+
+- `imageio-ffmpeg` が ffmpeg バイナリを取得できているか確認
+  （`python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"`）
+
+---
+
+## ライセンス・免責事項
+
+- 本リポジトリのコードは **デモ用途** での利用を前提としています。
+- 検知結果は参考情報であり、**実際の害虫防除判断には専門家の確認が必須** です。
+- サンプル画像・動画・学習データの著作権・利用条件は各素材ごとの規約に従ってください。
+- 第三者ライブラリ（Ultralytics YOLOv8 等）のライセンスにも別途従う必要があります。

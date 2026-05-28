@@ -11,11 +11,27 @@ import config
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    font_path = Path(config.JAPANESE_FONT_PATH)
-    if font_path.exists():
-        return ImageFont.truetype(str(font_path), size=size)
-    return ImageFont.load_default()
-
+    # Try each configured path
+    for font_path_str in config.JAPANESE_FONT_PATHS:
+        font_path = Path(font_path_str)
+        if font_path.exists():
+            try:
+                return ImageFont.truetype(str(font_path), size=size)
+            except Exception:
+                continue
+    
+    # Last resort: download NotoSansJP at runtime (requires requests + internet)
+    try:
+        import urllib.request, tempfile
+        url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"
+        tmp = Path(tempfile.gettempdir()) / "NotoSansCJKjp.otf"
+        if not tmp.exists():
+            urllib.request.urlretrieve(url, tmp)
+        return ImageFont.truetype(str(tmp), size=size)
+    except Exception:
+        pass
+    
+    return ImageFont.load_default()  # garbled, but won't crash
 
 class Detector:
     def __init__(self, model_path: str, conf_threshold: float = 0.5):
@@ -38,6 +54,36 @@ class Detector:
                 })
         return detections
 
+    def track(self, image: np.ndarray, persist: bool = True) -> list[dict]:
+        """Detect + track across frames using ByteTrack.
+
+        Call once per frame in sequence. Pass persist=False on the first frame
+        of a new video to reset the tracker, then persist=True for the rest.
+        Each detection gains a stable "track_id" that follows the same object.
+        """
+        results = self.model.track(
+            image,
+            conf=self.conf_threshold,
+            persist=persist,
+            tracker="bytetrack.yaml",
+            verbose=False,
+        )
+        detections: list[dict] = []
+        for r in results:
+            if r.boxes is None:
+                continue
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                track_id = int(box.id[0]) if box.id is not None else None
+                detections.append({
+                    "class_id": cls_id,
+                    "class_name": self.model.names[cls_id],
+                    "confidence": float(box.conf[0]),
+                    "bbox": box.xyxy[0].tolist(),
+                    "track_id": track_id,
+                })
+        return detections
+
     def annotate(self, image: np.ndarray, detections: list[dict]) -> np.ndarray:
         # Convert BGR (OpenCV) to RGB (Pillow) for text rendering, then back.
         pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -51,7 +97,9 @@ class Detector:
             b, g, r = config.CLASS_COLORS.get(det["class_name"], config.DEFAULT_COLOR)
             color_rgb = (r, g, b)
             label = config.CLASS_LABELS_SHORT_JP.get(det["class_name"], config.DEFAULT_LABEL_SHORT_JP)
-            text = f"{label} {det['confidence']:.2f}"
+            track_id = det.get("track_id")
+            id_str = f"#{track_id} " if track_id is not None else ""
+            text = f"{label} {id_str}{det['confidence']:.2f}"
             draw.rectangle([x1, y1, x2, y2], outline=color_rgb, width=3)
             # Text background for readability
             try:
